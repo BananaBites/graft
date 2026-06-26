@@ -30,6 +30,7 @@ use unicode_width::UnicodeWidthStr;
 
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MODULE_REPO: &str = "https://github.com/BananaBites/graft.git";
+const WORKTREE: &str = "WORKTREE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppMode {
@@ -89,6 +90,7 @@ struct CommitInfo {
     branch: String,
     branch_color: usize,
     branch_badge: String,
+    is_worktree: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -860,6 +862,9 @@ impl App {
         if self.focus != FocusKind::Commit || self.selected_commit >= self.commits.len() {
             return;
         }
+        if self.commits[self.selected_commit].is_worktree {
+            return;
+        }
         let hash = self.commits[self.selected_commit].hash.clone();
         if self.compare_a.is_empty() || (!self.compare_a.is_empty() && !self.compare_b.is_empty()) {
             self.compare_a = hash;
@@ -908,7 +913,8 @@ impl App {
         if self.selected_commit >= self.commits.len() {
             return;
         }
-        let hash = self.commits[self.selected_commit].hash.clone();
+        let commit = self.commits[self.selected_commit].clone();
+        let hash = commit.hash.clone();
         if self
             .expanded
             .as_ref()
@@ -938,7 +944,11 @@ impl App {
         self.selected_file = None;
         self.focus = FocusKind::Commit;
         self.lines_dirty = true;
-        spawn_load_commit_files(self.tx.clone(), token, hash);
+        if commit.is_worktree {
+            spawn_load_worktree_files(self.tx.clone(), token, hash);
+        } else {
+            spawn_load_commit_files(self.tx.clone(), token, hash);
+        }
     }
 
     fn toggle_inline_diff(&mut self) {
@@ -1277,6 +1287,8 @@ impl App {
         let exp = self.expanded.as_ref().unwrap();
         let head = if exp.compare {
             format!("{}compare {}..{}", prefix, short(&exp.a), short(&exp.b))
+        } else if exp.b == WORKTREE {
+            format!("{}changed files in working tree", prefix)
         } else {
             format!("{}changed files for {}", prefix, short(&exp.b))
         };
@@ -1413,14 +1425,24 @@ impl App {
         } else if self.err.is_some() {
             "graft — error".to_string()
         } else {
-            format!("graft — {} commits", self.commits.len())
+            let worktree = self.commits.first().map(|c| c.is_worktree).unwrap_or(false);
+            let commit_count = self.commits.len().saturating_sub(worktree as usize);
+            if worktree {
+                format!("graft — {} commits + working tree", commit_count)
+            } else {
+                format!("graft — {} commits", commit_count)
+            }
         };
         let mut state = String::new();
         if self.focus == FocusKind::Commit && self.selected_commit < self.commits.len() {
-            state.push_str(&format!(
-                " selected {}",
-                short(&self.commits[self.selected_commit].hash)
-            ));
+            if self.commits[self.selected_commit].is_worktree {
+                state.push_str(" selected working tree");
+            } else {
+                state.push_str(&format!(
+                    " selected {}",
+                    short(&self.commits[self.selected_commit].hash)
+                ));
+            }
         } else if self.focus == FocusKind::File {
             if let (Some(exp), Some(i)) = (&self.expanded, self.selected_file) {
                 if i < exp.files.len() {
@@ -2187,6 +2209,32 @@ fn spawn_load_commit_files(tx: Sender<Msg>, token: u64, hash: String) {
         let _ = tx.send(msg);
     });
 }
+
+fn spawn_load_worktree_files(tx: Sender<Msg>, token: u64, anchor: String) {
+    thread::spawn(move || {
+        let msg = match changed_files("HEAD", WORKTREE) {
+            Ok(files) => Msg::FilesLoaded {
+                token,
+                anchor_hash: anchor,
+                a: "HEAD".into(),
+                b: WORKTREE.into(),
+                compare: false,
+                files,
+                err: None,
+            },
+            Err(e) => Msg::FilesLoaded {
+                token,
+                anchor_hash: anchor,
+                a: "HEAD".into(),
+                b: WORKTREE.into(),
+                compare: false,
+                files: vec![],
+                err: Some(e.to_string()),
+            },
+        };
+        let _ = tx.send(msg);
+    });
+}
 fn spawn_load_files(
     tx: Sender<Msg>,
     token: u64,
@@ -2271,8 +2319,31 @@ fn load_graph(filters: Vec<GraphFilter>, ref_mode: RefFilterMode) -> Result<Vec<
     if ref_mode == RefFilterMode::Decorations {
         commits = filter_commits_by_decoration(commits, &filters);
     }
+    if worktree_is_dirty() {
+        commits.insert(0, worktree_commit());
+    }
     Ok(commits)
 }
+fn worktree_commit() -> CommitInfo {
+    CommitInfo {
+        hash: WORKTREE.into(),
+        line: "● working tree · uncommitted changes".into(),
+        pre_lines: vec![],
+        branch: String::new(),
+        branch_color: 0,
+        branch_badge: String::new(),
+        is_worktree: true,
+    }
+}
+
+fn worktree_is_dirty() -> bool {
+    Command::new("git")
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(false)
+}
+
 fn ensure_git_repo() -> Result<()> {
     let out = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -2381,6 +2452,7 @@ fn parse_graph(out: &str) -> Vec<CommitInfo> {
             branch: String::new(),
             branch_color: 0,
             branch_badge: String::new(),
+            is_worktree: false,
         });
         pending = vec![];
     }
@@ -2554,7 +2626,11 @@ fn commit_range(hash: &str) -> Result<(String, String)> {
     }
 }
 fn changed_files(a: &str, b: &str) -> Result<Vec<FileChange>> {
-    let out = run_capture_bytes("git", &["diff", "--name-status", "-M", "-z", a, b, "--"])?;
+    let out = if b == WORKTREE {
+        run_capture_bytes("git", &["diff", "--name-status", "-M", "-z", a, "--"])?
+    } else {
+        run_capture_bytes("git", &["diff", "--name-status", "-M", "-z", a, b, "--"])?
+    };
     Ok(parse_name_status(&out))
 }
 fn parse_name_status(out: &[u8]) -> Vec<FileChange> {
@@ -2630,7 +2706,11 @@ fn delta_diff(
     if [ -n "$8" ]; then delta_args+=(--features "$8"); fi
     if [ -n "$9" ]; then delta_args+=(--syntax-theme "$9"); fi
     if [ "${10}" = "light" ]; then delta_args+=(--light --zero-style 'syntax "#ffffff"'); elif [ "${10}" = "dark" ]; then delta_args+=(--dark); fi
-    git diff --color=always $5 $6 "$1" "$2" -- "$3" | delta "${delta_args[@]}""##;
+    if [ "$2" = "WORKTREE" ]; then
+        git diff --color=always $5 $6 "$1" -- "$3" | delta "${delta_args[@]}"
+    else
+        git diff --color=always $5 $6 "$1" "$2" -- "$3" | delta "${delta_args[@]}"
+    fi"##;
     let out = Command::new("bash")
         .args([
             "-lc",
@@ -2668,7 +2748,11 @@ fn delta_diff(
                 if show_ws {
                     args.push("--ws-error-highlight=all".into());
                 }
-                args.extend([a.into(), b.into(), "--".into(), path.into()]);
+                if b == WORKTREE {
+                    args.extend([a.into(), "--".into(), path.into()]);
+                } else {
+                    args.extend([a.into(), b.into(), "--".into(), path.into()]);
+                }
                 match Command::new("git")
                     .args(&args)
                     .env("CLICOLOR_FORCE", "1")
@@ -3089,39 +3173,90 @@ fn changed_diff_lines_from_kinds(kinds: &[DiffChangeKind]) -> Vec<usize> {
     out
 }
 fn diff_change_kinds(lines: &[String]) -> Vec<DiffChangeKind> {
+    let separator = detect_delta_separator(lines);
     lines
         .iter()
-        .map(|line| delta_side_by_side_change_kind(&strip_ansi(line)))
+        .map(|line| delta_side_by_side_change_kind_with_separator(&strip_ansi(line), separator))
         .collect()
 }
 
+fn detect_delta_separator(lines: &[String]) -> Option<usize> {
+    let mut counts = HashMap::<usize, usize>::new();
+    for line in lines {
+        let plain = strip_ansi(line);
+        for candidate in delta_side_by_side_candidates(&plain) {
+            *counts.entry(candidate.mid).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(mid, _)| mid)
+}
+
+#[cfg(test)]
 fn delta_side_by_side_change_kind(line: &str) -> DiffChangeKind {
-    let Some((old_no, old_text, new_no, new_text)) = parse_delta_side_by_side_line(line) else {
+    delta_side_by_side_change_kind_with_separator(line, None)
+}
+
+fn delta_side_by_side_change_kind_with_separator(
+    line: &str,
+    separator: Option<usize>,
+) -> DiffChangeKind {
+    let Some(parsed) = parse_delta_side_by_side_line(line, separator) else {
         return DiffChangeKind::None;
     };
-    if old_no.is_empty() && !new_no.is_empty() {
+    if parsed.old_no.is_empty() && !parsed.new_no.is_empty() {
         DiffChangeKind::Add
-    } else if !old_no.is_empty() && new_no.is_empty() {
+    } else if !parsed.old_no.is_empty() && parsed.new_no.is_empty() {
         DiffChangeKind::Delete
-    } else if !old_no.is_empty() && !new_no.is_empty() && old_text != new_text {
+    } else if !parsed.old_no.is_empty()
+        && !parsed.new_no.is_empty()
+        && parsed.old_text != parsed.new_text
+    {
         DiffChangeKind::Modify
     } else {
         DiffChangeKind::None
     }
 }
 
-fn parse_delta_side_by_side_line(line: &str) -> Option<(&str, &str, &str, &str)> {
-    let rest = line.strip_prefix('│')?;
-    let (old_no_raw, rest) = rest.split_once('│')?;
+struct DeltaSideBySideCandidate<'a> {
+    mid: usize,
+    old_no: &'a str,
+    old_text: &'a str,
+    new_no: &'a str,
+    new_text: &'a str,
+}
+
+fn parse_delta_side_by_side_line(
+    line: &str,
+    separator: Option<usize>,
+) -> Option<DeltaSideBySideCandidate<'_>> {
+    let candidates = delta_side_by_side_candidates(line);
+    if let Some(separator) = separator {
+        return candidates
+            .into_iter()
+            .find(|candidate| candidate.mid == separator);
+    }
+    let center = line.len() / 2;
+    candidates
+        .into_iter()
+        .min_by_key(|candidate| candidate.mid.abs_diff(center))
+}
+
+fn delta_side_by_side_candidates(line: &str) -> Vec<DeltaSideBySideCandidate<'_>> {
+    let Some(rest) = line.strip_prefix('│') else {
+        return vec![];
+    };
+    let Some((old_no_raw, rest)) = rest.split_once('│') else {
+        return vec![];
+    };
     let old_no = old_no_raw.trim();
     if !old_no.chars().all(|c| c.is_ascii_digit()) {
-        return None;
+        return vec![];
     }
 
-    // Old content may itself contain box-drawing characters, even followed by
-    // text that looks like a line-number column (`│ 586│`). Delta's real middle
-    // delimiter is the last valid delimiter before the new line-number column.
-    let mut best = None;
+    let mut out = Vec::new();
     let mut search_from = 0;
     while let Some(rel) = rest[search_from..].find('│') {
         let mid = search_from + rel;
@@ -3129,14 +3264,18 @@ fn parse_delta_side_by_side_line(line: &str) -> Option<(&str, &str, &str, &str)>
         if let Some((new_no_raw, new_text_raw)) = after_mid.split_once('│') {
             let new_no = new_no_raw.trim();
             if new_no.chars().all(|c| c.is_ascii_digit()) {
-                let old_text = rest[..mid].trim_end_matches([' ', '\t']);
-                let new_text = new_text_raw.trim_end_matches([' ', '\t']);
-                best = Some((old_no, old_text, new_no, new_text));
+                out.push(DeltaSideBySideCandidate {
+                    mid,
+                    old_no,
+                    old_text: rest[..mid].trim_end_matches([' ', '\t']),
+                    new_no,
+                    new_text: new_text_raw.trim_end_matches([' ', '\t']),
+                });
             }
         }
         search_from = mid + '│'.len_utf8();
     }
-    best
+    out
 }
 
 fn run_capture<S: AsRef<str>>(cmd: &str, args: &[S]) -> Result<String> {

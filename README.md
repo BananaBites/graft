@@ -7,6 +7,7 @@ A read-first, graph-first terminal Git navigator inspired by Git Graph.
 ## Features
 
 - Full-terminal `git log --graph` view with graph connector colors, stable branch identity colors, refs, subjects, relative time, and author.
+- Synthetic top entry for tracked working tree changes against `HEAD`.
 - Composable graph filters for message, branch, tag, author, and path.
 - Fuzzy branch/tag completion in filter mode.
 - Vim-style graph search with `/`, `n`, and `N`.
