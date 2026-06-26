@@ -2769,35 +2769,23 @@ fn usage_text() -> &'static str {
     "Usage: graft [options] [path]\n\nOptions:\n  --version                    Print version information and exit\n  --update                     Install latest main branch if it differs\n  --delta-theme <theme>        Activate a delta theme/feature for diff rendering\n  --delta-syntax-theme <theme> Activate a delta syntax theme explicitly\n  --delta-light                Use delta light mode\n  --delta-dark                 Use delta dark mode\n  --save-config                Save current theming options and exit\n  --show-delta-themes          Show available delta themes and exit\n  --list-delta-syntax-themes   List available delta syntax themes\n  --completion <shell>         Print shell completion for bash, zsh, or fish\n  -h, --help                   Show this help\n\nExamples:\n  graft\n  graft ~/src/my-repo\n  graft --version\n  graft --update\n  graft --completion bash\n"
 }
 fn version_text() -> String {
-    let commit = build_commit();
-    if commit == "unknown" {
-        format!("graft {}", env!("CARGO_PKG_VERSION"))
-    } else {
-        format!(
-            "graft {} commit {}",
-            env!("CARGO_PKG_VERSION"),
-            short(commit)
-        )
-    }
-}
-fn build_commit() -> &'static str {
-    env!("GRAFT_BUILD_COMMIT")
+    format!("graft {}", env!("CARGO_PKG_VERSION"))
 }
 fn run_update(_target: &str) -> Result<()> {
     require_in_path("cargo", "cargo is required for updates")?;
     require_in_path("git", "git is required for updates")?;
 
-    let current = build_commit();
     let latest = remote_main_commit()?;
-    if current != "unknown" && same_commit(current, &latest) {
-        println!("already up to date: main {}", short(&latest));
-        return Ok(());
-    }
-
-    if current == "unknown" {
-        println!("updating: unknown -> main {}", short(&latest));
-    } else {
-        println!("updating: {} -> main {}", short(current), short(&latest));
+    match installed_git_commit()? {
+        Some(current) if same_commit(&current, &latest) => {
+            println!("already up to date: main {}", short(&latest));
+            return Ok(());
+        }
+        Some(current) => println!("updating: {} -> main {}", short(&current), short(&latest)),
+        None => println!(
+            "installed commit unknown; installing main {}",
+            short(&latest)
+        ),
     }
 
     let args = [
@@ -2817,6 +2805,48 @@ fn run_update(_target: &str) -> Result<()> {
     } else {
         Err(anyhow!("update failed"))
     }
+}
+
+fn installed_git_commit() -> Result<Option<String>> {
+    let Some(cargo_home) = cargo_home() else {
+        return Ok(None);
+    };
+    for file in [".crates.toml", ".crates2.json"] {
+        let path = cargo_home.join(file);
+        let Ok(data) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(commit) = parse_installed_commit(&data) {
+            return Ok(Some(commit));
+        }
+    }
+    Ok(None)
+}
+
+fn cargo_home() -> Option<PathBuf> {
+    env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
+}
+
+fn parse_installed_commit(data: &str) -> Option<String> {
+    for line in data.lines() {
+        if !line.contains("graft") || !line.contains("git+") || !line.contains("BananaBites/graft")
+        {
+            continue;
+        }
+        let Some((_, after_hash)) = line.rsplit_once('#') else {
+            continue;
+        };
+        let commit: String = after_hash
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if (7..=40).contains(&commit.len()) {
+            return Some(commit);
+        }
+    }
+    None
 }
 
 fn remote_main_commit() -> Result<String> {
