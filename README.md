@@ -57,6 +57,14 @@ graft --update
 
 `--update` compares the installed commit to `main`; if they match, nothing is installed.
 
+## Shell completion
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions && graft --completion bash > ~/.local/share/bash-completion/completions/graft
+mkdir -p ~/.zfunc && graft --completion zsh > ~/.zfunc/_graft
+mkdir -p ~/.config/fish/completions && graft --completion fish > ~/.config/fish/completions/graft.fish
+```
+
 ## Usage
 
 Run `graft` inside a Git repository:

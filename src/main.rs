@@ -2766,10 +2766,17 @@ fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Result<CliOptions> {
     Ok(opts)
 }
 fn usage_text() -> &'static str {
-    "Usage: graft [options] [path]\n\nOptions:\n  --version                    Print version information and exit\n  --update                     Install latest main branch if it differs\n  --delta-theme <theme>        Activate a delta theme/feature for diff rendering\n  --delta-syntax-theme <theme> Activate a delta syntax theme explicitly\n  --delta-light                Use delta light mode\n  --delta-dark                 Use delta dark mode\n  --save-config                Save current theming options and exit\n  --show-delta-themes          Show available delta themes and exit\n  --list-delta-syntax-themes   List available delta syntax themes\n  --completion <shell>         Print shell completion for bash, zsh, or fish\n  -h, --help                   Show this help\n\nExamples:\n  graft\n  graft ~/src/my-repo\n  graft --version\n  graft --update\n  graft --completion bash\n"
+    "Usage: graft [options] [path]\n\nOptions:\n  --version                    Print version information and exit\n  --update                     Install latest main branch if it differs\n  --delta-theme <theme>        Activate a delta theme/feature for diff rendering\n  --delta-syntax-theme <theme> Activate a delta syntax theme explicitly\n  --delta-light                Use delta light mode\n  --delta-dark                 Use delta dark mode\n  --save-config                Save current theming options and exit\n  --show-delta-themes          Show available delta themes and exit\n  --list-delta-syntax-themes   List available delta syntax themes\n  --completion <shell>         Print shell completion for bash, zsh, or fish\n  -h, --help                   Show this help\n\nExamples:\n  graft\n  graft ~/src/my-repo\n  graft --version\n  graft --update\n  graft --completion bash\n\nInstall shell completion:\n  mkdir -p ~/.local/share/bash-completion/completions && graft --completion bash > ~/.local/share/bash-completion/completions/graft\n  mkdir -p ~/.zfunc && graft --completion zsh > ~/.zfunc/_graft\n  mkdir -p ~/.config/fish/completions && graft --completion fish > ~/.config/fish/completions/graft.fish\n"
 }
 fn version_text() -> String {
-    format!("graft {}", env!("CARGO_PKG_VERSION"))
+    match installed_git_commit().ok().flatten() {
+        Some(commit) => format!(
+            "graft {} commit {}",
+            env!("CARGO_PKG_VERSION"),
+            short(&commit)
+        ),
+        None => format!("graft {}", env!("CARGO_PKG_VERSION")),
+    }
 }
 fn run_update(_target: &str) -> Result<()> {
     require_in_path("cargo", "cargo is required for updates")?;
