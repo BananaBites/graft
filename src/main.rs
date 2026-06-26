@@ -2705,8 +2705,7 @@ fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Result<CliOptions> {
         match arg.as_str() {
             "-h" | "--help" => opts.help = true,
             "--version" | "-version" => opts.version = true,
-            "--update-to-latest-version" => opts.update_target = "version".into(),
-            "--update-to-latest-release" => opts.update_target = "release".into(),
+            "--update" => opts.update_target = "main".into(),
             "--show-delta-themes" => opts.show_delta_themes = true,
             "--save-config" => opts.save_config = true,
             "--delta-light" => {
@@ -2767,26 +2766,80 @@ fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Result<CliOptions> {
     Ok(opts)
 }
 fn usage_text() -> &'static str {
-    "Usage: graft [options] [path]\n\nOptions:\n  --version                    Print version information and exit\n  --update-to-latest-version   Install the latest main branch version\n  --update-to-latest-release   Install the latest tagged release\n  --delta-theme <theme>        Activate a delta theme/feature for diff rendering\n  --delta-syntax-theme <theme> Activate a delta syntax theme explicitly\n  --delta-light                Use delta light mode\n  --delta-dark                 Use delta dark mode\n  --save-config                Save current theming options and exit\n  --show-delta-themes          Show available delta themes and exit\n  --list-delta-syntax-themes   List available delta syntax themes\n  --completion <shell>         Print shell completion for bash, zsh, or fish\n  -h, --help                   Show this help\n\nExamples:\n  graft\n  graft ~/src/my-repo\n  graft --version\n  graft --update-to-latest-release\n  graft --update-to-latest-version\n  graft --completion bash\n"
+    "Usage: graft [options] [path]\n\nOptions:\n  --version                    Print version information and exit\n  --update                     Install latest main branch if it differs\n  --delta-theme <theme>        Activate a delta theme/feature for diff rendering\n  --delta-syntax-theme <theme> Activate a delta syntax theme explicitly\n  --delta-light                Use delta light mode\n  --delta-dark                 Use delta dark mode\n  --save-config                Save current theming options and exit\n  --show-delta-themes          Show available delta themes and exit\n  --list-delta-syntax-themes   List available delta syntax themes\n  --completion <shell>         Print shell completion for bash, zsh, or fish\n  -h, --help                   Show this help\n\nExamples:\n  graft\n  graft ~/src/my-repo\n  graft --version\n  graft --update\n  graft --completion bash\n"
 }
 fn version_text() -> String {
-    format!("graft {}", env!("CARGO_PKG_VERSION"))
+    let commit = build_commit();
+    if commit == "unknown" {
+        format!("graft {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!(
+            "graft {} commit {}",
+            env!("CARGO_PKG_VERSION"),
+            short(commit)
+        )
+    }
 }
-fn run_update(target: &str) -> Result<()> {
+fn build_commit() -> &'static str {
+    env!("GRAFT_BUILD_COMMIT")
+}
+fn run_update(_target: &str) -> Result<()> {
     require_in_path("cargo", "cargo is required for updates")?;
     require_in_path("git", "git is required for updates")?;
-    let args = if target == "release" {
-        vec!["install", "--git", MODULE_REPO, "graft"]
+
+    let current = build_commit();
+    let latest = remote_main_commit()?;
+    if current != "unknown" && same_commit(current, &latest) {
+        println!("already up to date: main {}", short(&latest));
+        return Ok(());
+    }
+
+    if current == "unknown" {
+        println!("updating: unknown -> main {}", short(&latest));
     } else {
-        vec!["install", "--git", MODULE_REPO, "--branch", "main", "graft"]
-    };
-    println!("running: cargo {}", args.join(" "));
-    let status = Command::new("cargo").args(&args).status()?;
+        println!("updating: {} -> main {}", short(current), short(&latest));
+    }
+
+    let args = [
+        "install",
+        "--git",
+        MODULE_REPO,
+        "--branch",
+        "main",
+        "--locked",
+        "--force",
+        "graft",
+    ];
+    let status = Command::new("cargo").args(args).status()?;
     if status.success() {
+        println!("updated to main {}", short(&latest));
         Ok(())
     } else {
-        Err(anyhow!("cargo install failed"))
+        Err(anyhow!("update failed"))
     }
+}
+
+fn remote_main_commit() -> Result<String> {
+    let out = Command::new("git")
+        .args(["ls-remote", MODULE_REPO, "refs/heads/main"])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "could not query main branch: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("could not resolve main branch"))
+}
+
+fn same_commit(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
 }
 
 fn config_file_path() -> Result<PathBuf> {
@@ -2884,14 +2937,14 @@ _graft_completions() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     if [[ "$prev" == "--completion" ]]; then COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ); return 0; fi
-    if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "--help --version --update-to-latest-version --update-to-latest-release --delta-theme --delta-syntax-theme --delta-light --delta-dark --save-config --show-delta-themes --list-delta-syntax-themes --completion" -- "$cur") ); return 0; fi
+    if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "--help --version --update --delta-theme --delta-syntax-theme --delta-light --delta-dark --save-config --show-delta-themes --list-delta-syntax-themes --completion" -- "$cur") ); return 0; fi
     mapfile -t COMPREPLY < <(compgen -d -S / -- "$cur")
     compopt -o filenames -o nospace 2>/dev/null
 }
 complete -o filenames -o nospace -F _graft_completions graft
 "#;
-const ZSH_COMPLETION: &str = "#compdef graft\n\n_arguments \\\n  '(-h --help)'{-h,--help}'[Show help]' \\\n  '--version[Print version information]' \\\n  '--update-to-latest-version[Install latest main branch version]' \\\n  '--update-to-latest-release[Install latest tagged release]' \\\n  '--delta-theme[Activate delta theme/feature]:theme:' \\\n  '--delta-syntax-theme[Activate delta syntax theme]:theme:' \\\n  '--delta-light[Use delta light mode]' \\\n  '--delta-dark[Use delta dark mode]' \\\n  '--save-config[Save current theming options and exit]' \\\n  '--show-delta-themes[Show available delta themes]' \\\n  '--list-delta-syntax-themes[List available delta syntax themes]' \\\n  '--completion[Print shell completion]:shell:(bash zsh fish)' \\\n  '*:directory:_files -/'\n";
-const FISH_COMPLETION: &str = "complete -c graft -s h -l help -d 'Show help'\ncomplete -c graft -l version -d 'Print version information'\ncomplete -c graft -l update-to-latest-version -d 'Install latest main branch version'\ncomplete -c graft -l update-to-latest-release -d 'Install latest tagged release'\ncomplete -c graft -l delta-theme -x -d 'Activate delta theme/feature'\ncomplete -c graft -l delta-syntax-theme -x -d 'Activate delta syntax theme'\ncomplete -c graft -l delta-light -d 'Use delta light mode'\ncomplete -c graft -l delta-dark -d 'Use delta dark mode'\ncomplete -c graft -l save-config -d 'Save current theming options and exit'\ncomplete -c graft -l show-delta-themes -d 'Show available delta themes'\ncomplete -c graft -l list-delta-syntax-themes -d 'List available delta syntax themes'\ncomplete -c graft -l completion -x -a 'bash zsh fish' -d 'Print shell completion'\ncomplete -c graft -a '(__fish_complete_directories)' -d 'Git repository path'\n";
+const ZSH_COMPLETION: &str = "#compdef graft\n\n_arguments \\\n  '(-h --help)'{-h,--help}'[Show help]' \\\n  '--version[Print version information]' \\\n  '--update[Install latest main branch if it differs]' \\\n  '--delta-theme[Activate delta theme/feature]:theme:' \\\n  '--delta-syntax-theme[Activate delta syntax theme]:theme:' \\\n  '--delta-light[Use delta light mode]' \\\n  '--delta-dark[Use delta dark mode]' \\\n  '--save-config[Save current theming options and exit]' \\\n  '--show-delta-themes[Show available delta themes]' \\\n  '--list-delta-syntax-themes[List available delta syntax themes]' \\\n  '--completion[Print shell completion]:shell:(bash zsh fish)' \\\n  '*:directory:_files -/'\n";
+const FISH_COMPLETION: &str = "complete -c graft -s h -l help -d 'Show help'\ncomplete -c graft -l version -d 'Print version information'\ncomplete -c graft -l update -d 'Install latest main branch if it differs'\ncomplete -c graft -l delta-theme -x -d 'Activate delta theme/feature'\ncomplete -c graft -l delta-syntax-theme -x -d 'Activate delta syntax theme'\ncomplete -c graft -l delta-light -d 'Use delta light mode'\ncomplete -c graft -l delta-dark -d 'Use delta dark mode'\ncomplete -c graft -l save-config -d 'Save current theming options and exit'\ncomplete -c graft -l show-delta-themes -d 'Show available delta themes'\ncomplete -c graft -l list-delta-syntax-themes -d 'List available delta syntax themes'\ncomplete -c graft -l completion -x -a 'bash zsh fish' -d 'Print shell completion'\ncomplete -c graft -a '(__fish_complete_directories)' -d 'Git repository path'\n";
 
 fn key_name(k: KeyEvent) -> String {
     match k.code {

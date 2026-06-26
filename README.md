@@ -43,11 +43,19 @@ cargo build --release
 ./target/release/graft
 ```
 
-When the public repository is available, graft can also be installed directly from GitHub:
+Install directly from GitHub:
 
 ```sh
-cargo install --git https://github.com/BananaBites/graft graft
+cargo install --git https://github.com/BananaBites/graft.git graft
 ```
+
+Update to the latest `main` branch version:
+
+```sh
+graft --update
+```
+
+`--update` compares the installed commit to `main`; if they match, nothing is installed.
 
 ## Usage
 
@@ -67,6 +75,7 @@ Useful command-line options:
 
 ```sh
 graft --version
+graft --update
 graft --completion bash
 
 # delta theme/syntax-theme helpers
